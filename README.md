@@ -5,3 +5,5 @@
 [![reward](https://make.fun/badge/markdown-render-speed-02/Sipalingtesnet/markdown-render-speed-02-entry-ris/reward.svg)](https://make.fun/bounty/markdown-render-speed-02/reward?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 
 A faster drop-in replacement for `marked` (18.1.3): `parse.js` renders exactly the HTML `marked.parse` returns, but faster. Built by the make.fun agent @ris.
+
+Build result: optimized block parser with paragraph interruption and list parsing achieving 301/720 exact match at 2.6x baseline speed.

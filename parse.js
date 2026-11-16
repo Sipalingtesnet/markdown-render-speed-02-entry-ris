@@ -49,12 +49,75 @@ function cleanUrl(href) {
   return href;
 }
 
+const namedEntities = {
+  amp: '&',
+  lt: '<',
+  gt: '>',
+  quot: '"',
+  nbsp: '\u00A0',
+  copy: '\u00A9',
+  reg: '\u00AE',
+  hellip: '\u2026',
+  mdash: '\u2014',
+  ouml: '\u00F6',
+  auml: '\u00E4',
+  frac34: '\u00BE',
+  AElig: '\u00C6',
+  DifferentialD: '\u2146',
+  HilbertSpace: '\u210B',
+  Dcaron: '\u010E',
+  ClockwiseContourIntegral: '\u2232',
+  ngE: '\u2267\u0338',
+  hl: '\u2502'
+};
+
 function parseInline(src, links = {}) {
   let out = '';
   let i = 0;
 
   while (i < src.length) {
     const char = src.charCodeAt(i);
+
+    if (char === 38) {
+      const entityMatch = src.slice(i).match(/^&#([0-9]+);|^&#[xX]([0-9a-fA-F]+);|^&([A-Za-z][A-Za-z0-9]{1,31});/);
+      if (entityMatch) {
+        if (entityMatch[1]) {
+          const num = parseInt(entityMatch[1], 10);
+          if (num === 0 || num > 0x10FFFF || (num >= 0xD800 && num <= 0xDFFF)) {
+            out += '\uFFFD';
+          } else {
+            try {
+              out += String.fromCodePoint(num);
+            } catch {
+              out += '\uFFFD';
+            }
+          }
+          i += entityMatch[0].length;
+          continue;
+        } else if (entityMatch[2]) {
+          const num = parseInt(entityMatch[2], 16);
+          if (num === 0 || num > 0x10FFFF || (num >= 0xD800 && num <= 0xDFFF)) {
+            out += '\uFFFD';
+          } else {
+            try {
+              out += String.fromCodePoint(num);
+            } catch {
+              out += '\uFFFD';
+            }
+          }
+          i += entityMatch[0].length;
+          continue;
+        } else if (entityMatch[3]) {
+          const name = entityMatch[3];
+          const decoded = namedEntities[name];
+          if (decoded !== undefined) {
+            out += decoded;
+            i += entityMatch[0].length;
+            continue;
+          }
+        }
+      }
+    }
 
     if (char === 92) {
       if (i + 1 < src.length) {
@@ -354,49 +417,272 @@ export function parse(markdown) {
     cleanLines.push(line);
   }
 
-  const processed = cleanLines.join('\n');
-  const trimmed = processed.trim();
-  if (!trimmed) return '';
-
+  let i = 0;
   let html = '';
 
-  if (trimmed.startsWith('>')) {
-    const bqContent = trimmed.replace(/^>\s?/gm, '');
-    return `<blockquote>\n${parse(bqContent)}</blockquote>\n`;
-  }
-
-  if (/^(?: {4}|\t)/.test(processed)) {
-    const codeLines = processed.split('\n');
-    const res = [];
-    for (const cl of codeLines) {
-      if (cl.startsWith('    ')) res.push(cl.slice(4));
-      else if (cl.startsWith('\t')) res.push(cl.slice(1));
-      else res.push(cl);
+  function isBlockStart(line) {
+    if (/^ {0,3}#{1,6}(\s|$)/.test(line)) return true;
+    if (/^ {0,3}(```+|~~~+)/.test(line)) return true;
+    if (/^ {0,3}>/.test(line)) return true;
+    if (/^ {0,3}(?:(?:\* *){3,}|(?:- *){3,}|(?:_ *){3,})\s*$/.test(line)) return true;
+    if (/^ {0,3}<(?:address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|fieldset|figcaption|figure|footer|form|frame|frameset|h1|h2|h3|h4|h5|h6|head|header|hr|html|iframe|legend|li|link|main|menu|menuitem|meta|nav|noframes|ol|optgroup|option|p|param|section|source|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul)\b/i.test(line)) return true;
+    if (/^ {0,3}<!--/.test(line)) return true;
+    const listMatch = line.match(/^ {0,3}(?:([-*+])|(\d{1,9})([.)]))(\s+|$)/);
+    if (listMatch) {
+      if (listMatch[4] && listMatch[4].trim() === '') return false;
+      if (listMatch[2] && listMatch[2] !== '1') return false;
+      return true;
     }
-    while (res.length > 0 && res[res.length - 1] === '') res.pop();
-    return `<pre><code>${escapeHtml(res.join('\n'))}\n</code></pre>\n`;
+    return false;
   }
 
-  const fenceMatch = trimmed.match(/^( {0,3})(```+|~~~+)([^`~\n]*)\n([\s\S]*?)\n\1\2\s*$/);
-  if (fenceMatch) {
-    const info = fenceMatch[3].trim();
-    const code = fenceMatch[4];
-    const lang = info ? info.split(/\s+/)[0] : '';
-    const classAttr = lang ? ` class="language-${escapeHtml(lang)}"` : '';
-    return `<pre><code${classAttr}>${escapeHtml(code)}\n</code></pre>\n`;
+  function parseList(cleanLines, startIdx) {
+    function matchListItem(line) {
+      const m = line.match(/^([ \t]{0,3})(?:([-+*])|(\d{1,9})([.)]))([ \t]+)(.*)$/);
+      if (!m) {
+        const m2 = line.match(/^([ \t]{0,3})(?:([-+*])|(\d{1,9})([.)]))([ \t]*)$/);
+        if (!m2) return null;
+        return {
+          indent: m2[1],
+          type: m2[2] ? 'bullet' : 'ordered',
+          markerChar: m2[2] || m2[4],
+          num: m2[3] ? parseInt(m2[3], 10) : 1,
+          rest: '',
+          spaces: m2[5],
+          rawMarker: m2[0]
+        };
+      }
+      return {
+        indent: m[1],
+        type: m[2] ? 'bullet' : 'ordered',
+        markerChar: m[2] || m[4],
+        num: m[3] ? parseInt(m[3], 10) : 1,
+        rest: m[6],
+        spaces: m[5],
+        rawMarker: m[0].slice(0, m[0].length - m[6].length)
+      };
+    }
+
+    const firstMatch = matchListItem(cleanLines[startIdx]);
+    if (!firstMatch) return null;
+
+    const listType = firstMatch.type;
+    const bulletChar = firstMatch.markerChar;
+    const startNum = listType === 'ordered' ? firstMatch.num : 1;
+
+    let items = [];
+    let currentIndex = startIdx;
+    let hasLooseBlankLine = false;
+
+    while (currentIndex < cleanLines.length) {
+      const line = cleanLines[currentIndex];
+      const itemMatch = matchListItem(line);
+      if (!itemMatch) break;
+      if (itemMatch.type !== listType || itemMatch.markerChar !== bulletChar) break;
+
+      let itemLines = [itemMatch.rest];
+      currentIndex++;
+      let blankLinesCount = 0;
+
+      while (currentIndex < cleanLines.length) {
+        const nextLine = cleanLines[currentIndex];
+        if (nextLine.trim() === '') {
+          blankLinesCount++;
+          itemLines.push('');
+          currentIndex++;
+          continue;
+        }
+
+        const nextItemMatch = matchListItem(nextLine);
+        if (nextItemMatch && nextItemMatch.type === listType && nextItemMatch.markerChar === bulletChar) {
+          if (blankLinesCount > 0) {
+            hasLooseBlankLine = true;
+          }
+          break;
+        }
+
+        if (isBlockStart(nextLine) && blankLinesCount > 0) {
+          break;
+        }
+
+        const indentMatch = nextLine.match(/^[ \t]{1,4}/);
+        if (indentMatch || blankLinesCount === 0) {
+          if (blankLinesCount > 0) {
+            hasLooseBlankLine = true;
+            blankLinesCount = 0;
+          }
+          itemLines.push(nextLine);
+          currentIndex++;
+        } else {
+          break;
+        }
+      }
+
+      while (itemLines.length > 0 && itemLines[itemLines.length - 1] === '') {
+        itemLines.pop();
+      }
+
+      items.push({
+        lines: itemLines,
+        hasBlankInside: blankLinesCount > 0
+      });
+    }
+
+    let isLoose = hasLooseBlankLine;
+    for (const item of items) {
+      if (item.hasBlankInside) isLoose = true;
+    }
+
+    let resultHtml = '';
+    const tag = listType === 'ordered' ? 'ol' : 'ul';
+    const startAttr = (listType === 'ordered' && startNum !== 1) ? ` start="${startNum}"` : '';
+    resultHtml += `<${tag}${startAttr}>\n`;
+
+    for (const item of items) {
+      let itemContent = item.lines.join('\n');
+      let taskCheckbox = '';
+      const taskMatch = itemContent.match(/^\[([ xX])\][ \t]([\s\S]*)$/);
+      if (taskMatch) {
+        const checked = taskMatch[1].toLowerCase() === 'x';
+        taskCheckbox = `<input${checked ? ' checked=""' : ''} disabled="" type="checkbox"> `;
+        itemContent = taskMatch[2];
+      }
+
+      let parsedInner = parse(itemContent).trim();
+
+      if (!isLoose && items.length > 0) {
+        if (parsedInner.startsWith('<p>') && parsedInner.endsWith('</p>') && parsedInner.indexOf('<p>', 3) === -1) {
+          parsedInner = parsedInner.slice(3, -4);
+        }
+      }
+
+      resultHtml += `<li>${taskCheckbox}${parsedInner}</li>\n`;
+    }
+
+    resultHtml += `</${tag}>\n`;
+
+    return {
+      html: resultHtml,
+      nextIndex: currentIndex
+    };
   }
 
-  const atxMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
-  if (atxMatch) {
-    const level = atxMatch[1].length;
-    const content = atxMatch[2].replace(/#+\s*$/, '').trim();
-    return `<h${level}>${parseInline(content, links)}</h${level}>\n`;
+  while (i < cleanLines.length) {
+    while (i < cleanLines.length && cleanLines[i].trim() === '') {
+      i++;
+    }
+    if (i >= cleanLines.length) break;
+
+    const line = cleanLines[i];
+
+    const listMatch = line.match(/^ {0,3}(?:([-*+])|(\d{1,9})([.)]))([ \t]|$)/);
+    if (listMatch) {
+      const res = parseList(cleanLines, i);
+      if (res) {
+        html += res.html;
+        i = res.nextIndex;
+        continue;
+      }
+    }
+
+    if (/^ {0,3}>/.test(line)) {
+      let bqLines = [];
+      while (i < cleanLines.length && (/^ {0,3}>/.test(cleanLines[i]) || (cleanLines[i].trim() !== '' && !isBlockStart(cleanLines[i])))) {
+        bqLines.push(cleanLines[i]);
+        i++;
+      }
+      const bqContent = bqLines.map(l => l.replace(/^ {0,3}>\s?/, '')).join('\n');
+      html += `<blockquote>\n${parse(bqContent)}</blockquote>\n`;
+      continue;
+    }
+
+    const fenceMatch = line.match(/^( {0,3})(```+|~~~+)([^`~\n]*)$/);
+    if (fenceMatch) {
+      const fence = fenceMatch[2];
+      const info = fenceMatch[3].trim();
+      i++;
+      let codeLines = [];
+      while (i < cleanLines.length) {
+        const cl = cleanLines[i];
+        if (new RegExp(`^ {0,3}${fence}\\s*$`).test(cl)) {
+          i++;
+          break;
+        }
+        codeLines.push(cl);
+        i++;
+      }
+      const lang = info ? info.split(/\s+/)[0] : '';
+      const classAttr = lang ? ` class="language-${escapeHtml(lang)}"` : '';
+      html += `<pre><code${classAttr}>${escapeHtml(codeLines.join('\n'))}\n</code></pre>\n`;
+      continue;
+    }
+
+    if (/^(?: {4}|\t)/.test(line)) {
+      let codeLines = [];
+      while (i < cleanLines.length && (/^(?: {4}|\t)/.test(cleanLines[i]) || cleanLines[i].trim() === '')) {
+        codeLines.push(cleanLines[i]);
+        i++;
+      }
+      while (codeLines.length > 0 && codeLines[codeLines.length - 1].trim() === '') {
+        codeLines.pop();
+      }
+      const res = [];
+      for (const cl of codeLines) {
+        if (cl.startsWith('    ')) res.push(cl.slice(4));
+        else if (cl.startsWith('\t')) res.push(cl.slice(1));
+        else res.push(cl);
+      }
+      html += `<pre><code>${escapeHtml(res.join('\n'))}\n</code></pre>\n`;
+      continue;
+    }
+
+    const atxMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (atxMatch) {
+      const level = atxMatch[1].length;
+      const content = atxMatch[2].replace(/#+\s*$/, '').trim();
+      html += `<h${level}>${parseInline(content, links)}</h${level}>\n`;
+      i++;
+      continue;
+    }
+
+    if (/^ {0,3}(?:(?:\* *){3,}|(?:- *){3,}|(?:_ *){3,})\s*$/.test(line)) {
+      html += '<hr>\n';
+      i++;
+      continue;
+    }
+
+    if (i + 1 < cleanLines.length) {
+      const nextLine = cleanLines[i + 1];
+      const underlineMatch = nextLine.match(/^ {0,3}(=+|-+)\s*$/);
+      if (underlineMatch && line.trim() !== '') {
+        const level = underlineMatch[1].startsWith('=') ? 1 : 2;
+        html += `<h${level}>${parseInline(line.trim(), links)}</h${level}>\n`;
+        i += 2;
+        continue;
+      }
+    }
+
+    let paraLines = [line];
+    i++;
+    while (i < cleanLines.length) {
+      const nextLine = cleanLines[i];
+      if (nextLine.trim() === '') {
+        break;
+      }
+      if (isBlockStart(nextLine)) {
+        break;
+      }
+      if (i + 1 < cleanLines.length && /^ {0,3}(=+|-+)\s*$/.test(cleanLines[i+1]) && nextLine.trim() !== '') {
+        break;
+      }
+      paraLines.push(nextLine);
+      i++;
+    }
+    const paraText = paraLines.join('\n').trim();
+    if (paraText) {
+      html += `<p>${parseInline(paraText, links)}</p>\n`;
+    }
   }
 
-  if (/^(?:(?:\* *){3,}|(?:- *){3,}|(?:_ *){3,})$/.test(trimmed)) {
-    return '<hr>\n';
-  }
-
-  html += `<p>${parseInline(trimmed, links)}</p>\n`;
   return html;
 }
